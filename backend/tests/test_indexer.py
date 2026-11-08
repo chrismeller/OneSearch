@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from datetime import datetime, timezone
 from unittest.mock import Mock, AsyncMock, patch
 import json
+import os
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -811,3 +812,39 @@ class TestOneBadDocument:
             assert [d.path for d in indexed] == [str(good)]
             statuses = {f.path: f.status for f in db_session.query(IndexedFile).filter_by(source_id="mixed_src")}
             assert statuses == {str(good): "success", str(bad): "failed"}
+
+
+class TestUndecodableFileName:
+    """A file name that is not valid UTF-8 must not abort indexing of the source."""
+
+    @pytest.mark.asyncio
+    async def test_bad_file_name_fails_alone_and_run_completes(
+        self, db_session, mock_search_service
+    ):
+        with TemporaryDirectory() as tmp:
+            # Byte 0x92 is a Windows-1252 apostrophe and is not valid UTF-8
+            with open(os.path.join(os.fsencode(tmp), b"Heather\x92s Tornado Disaster.txt"), "wb") as f:
+                f.write(b"A tornado story")
+            (Path(tmp) / "normal.txt").write_text("Normal file")
+
+            source = Source(
+                id="bad-name",
+                name="Bad Name",
+                root_path=tmp,
+                include_patterns=json.dumps(["**/*.txt"]),
+                exclude_patterns=json.dumps([]),
+            )
+            db_session.add(source)
+            db_session.commit()
+
+            stats = await IndexingService(db_session, mock_search_service).index_source("bad-name")
+
+            assert stats.total_scanned == 2
+            assert stats.successful == 1
+            assert stats.failed == 1
+            # The stats are returned by the reindex API, so they must serialize
+            json.dumps(stats.to_dict()).encode("utf-8")
+
+            indexed = db_session.query(IndexedFile).filter_by(source_id="bad-name").all()
+            assert [Path(f.path).name for f in indexed] == ["normal.txt"]
+            assert indexed[0].status == "success"

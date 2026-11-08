@@ -244,10 +244,27 @@ class IndexingService:
                         extra={"file_path": file_path, "error": str(e)},
                     )
                     stats.failed += 1
-                    stats.errors.append({"file": file_path, "error": str(e)})
+                    # Stats are returned as JSON; a file name that is not valid UTF-8
+                    # would make the response itself fail, so escape it the same way
+                    # Python escapes it in log output.
+                    stats.errors.append(
+                        {
+                            "file": file_path.encode("utf-8", "backslashreplace").decode("utf-8"),
+                            "error": str(e).encode("utf-8", "backslashreplace").decode("utf-8"),
+                        }
+                    )
 
-                    # Update indexed_files with error
-                    self._update_indexed_file(source_id, file_path, status="failed", error=str(e))
+                    # Update indexed_files with error. Failing to record one file's
+                    # failure must not abort indexing of the whole source.
+                    try:
+                        self._update_indexed_file(
+                            source_id, file_path, status="failed", error=str(e)
+                        )
+                    except Exception as record_error:
+                        logger.error(
+                            f"Could not record failure for '{Path(file_path).name}': "
+                            f"{type(record_error).__name__}: {record_error}"
+                        )
                     if file_path in indexed_files_map:
                         await self._remove_stale_document(source_id, file_path)
 
